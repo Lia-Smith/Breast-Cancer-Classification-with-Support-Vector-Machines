@@ -1,0 +1,390 @@
+---
+title: "STAT 211 Breast Cancer Diagnosis"
+author: "Lia Smith"
+institute: "Middlebury College"
+format:
+  html:
+    toc: true
+    toc-depth: 1
+    code-overflow: wrap
+    code-fold: true  
+    embed-resources: true
+    mathjax: true
+---
+
+## Introduction
+
+My Project utilizes Breast Cancer data containing variables derived from digitalized images of a fine needle aspirate (FNA) of a breast mass. The features describe characteristics of the cell nuclie present in the image. This data was compiled from Wisconsin patients, suggesting the observations are independent. The column diagnosis or later is_mal is a categorical variable with two levels, benign and malignant, which describe whether the mass is benign or malignant. Other variables are continuous variables delineating the various features of the digitized images such as worst_radius of the mass, etc. In this project, I aim to create a model to classify the data using logistic regression and understand what features were important in those classifications.
+
+## Loading Packages
+
+```{r}
+#| warning: false
+#| message: false
+library(tidyverse)
+library(caret)
+library(plotly)
+library(car)
+library(corrplot)
+library(kableExtra)
+library(broom)
+library(boot)
+library(ggdendro)
+library(knitr)
+library(equatiomatic)
+library(pROC)
+library(kernlab)
+```
+
+## Loading Data
+
+```{r, results='hide'}
+#| message: false
+
+
+cancer_data <- read.csv("C:/Users/liapu/OneDrive/Desktop/Fall 2024/breast-cancer.csv")
+```
+
+## Exploratory Data Analysis
+
+When I noticed a plethora of features with similar names, I decided to do some investigation into the multicolinearity of the features. If a VIF value for a variable is 4, it warrants further investigation. If a value is over ten, it means there's serious multicollinearity.
+
+### Vif Calcuations
+
+```{r vif calc}
+#| warning: false
+#| label: table 1
+#| fig-cap: "VIF calculations"
+
+binary_cancer <- cancer_data |>
+  mutate(is_mal = as.factor(ifelse(diagnosis == "M", 1, 0)))
+
+model <- glm(is_mal ~ ., family = binomial, data = binary_cancer |> select(-id, -diagnosis))
+
+# Calculate VIF
+vif_values <- vif(model) |>
+  tidy() |>
+  print()
+```
+
+### Correlation Heatmap
+
+After realizing that ggpairs wouldn't be able to handle 30 variables, I decided to use a correlation heatmap in order to understand which variables were highly correlated and pick the variables with more explanatory power. After finding too many correlated variables, I decided to use PCA in order to create linearly independent variables for regression and avoid multicollinearity.
+
+```{r heatmap}
+#| label: graph 1
+#| fig-cap: "Graph 1: A matrix of Correlation Values Between Different Predictor Variables."
+corr_matrix <- cor(cancer_data |> select(-id, -diagnosis), use = "complete.obs")
+corr_long <- as.data.frame(as.table(corr_matrix))
+plot_ly(
+  data = corr_long,
+  x = ~Var1,
+  y = ~Var2,
+  z = ~Freq,
+  type = "heatmap",
+  colors = colorRamp(c("white", "grey", "black"))
+) %>%
+  layout(title = "Correlation Matrix Heatmap")
+
+```
+
+## Visualization
+
+### 3D Scatter Plot
+
+In order to better understand the malignancy and benign split in the data, I made a 3-D scatter splot with some initial features that seemed important. I decided that logistic regression would make more sense given the categorical nature of the diagnosis variable. (Please note that this graph can be rotated and zoomed in/out).
+
+```{r}
+#| label: graph 2
+#| fig-cap: "Graph 2: Texture of the Tumor, Longest Perimeter of the Tumor, and the Most Severe Concavity of the Tumor Vs Tumor Classification"
+plot_ly(data = cancer_data, 
+        x= ~texture_se, 
+        z=~concave.points_worst,
+        y = ~`radius_worst`, 
+        color = ~as.factor(diagnosis), 
+        colors = c("pink", "hotpink"), 
+        type="scatter3d", mode="markers")
+```
+
+```         
+```
+
+## Methodology
+
+### Principle Component Analysis (PCA)
+
+I used PCA to create 30 components that were linearly independent. From these components, I used a 95% variance threshold (note elbow plot in appendix) in order to utilize variables in my models that captured key features and avoid overfitting the model.
+
+```{r, results = "hide"}
+#| message: false
+
+pca_cancer <- binary_cancer |> select(-diagnosis, -id, -is_mal) |> scale() |> prcomp()
+
+cancer_final <- binary_cancer |>
+  mutate(is_mal = as.factor(is_mal)) |>
+  select(is_mal) |>
+  mutate(PC1 = pca_cancer$x[,1],
+         PC2 = pca_cancer$x[,2],
+         PC3 = pca_cancer$x[,3],
+         PC4 = pca_cancer$x[,4],
+         PC5 = pca_cancer$x[,5],
+         PC6 = pca_cancer$x[,6],
+         PC7 = pca_cancer$x[,7],
+         PC8 = pca_cancer$x[,8],
+         PC9 = pca_cancer$x[,9],
+         PC10 = pca_cancer$x[,10])
+
+
+```
+
+### Step-Wise Logistic Function
+
+I used a forward step-wise function in order to build a model with features that minimized AIC, an accuracy metric used to penalize models with too many variables. Principle component 7 was removed from the model since it raised AIC as compared to models without component 7. PC10 was selected out of the data since it was always included in the forward step-wise model while having a p-value greater than 15% and lowering the overall accuracy of the validated model. I also selected out PC6 since it had a p-value of \~ 10% and lowered the accuracy of the validated model by .3%. Perhaps metrics other than AIC are better for measuring which components should be used in principle component regression.
+
+```{r, results = "hide"}
+#| warning: false
+#| message: false
+#| output: false
+#| results: false
+
+
+logistic_model_small <- glm(is_mal ~1, family = binomial, 
+                      data = cancer_final)
+
+logistic_model_full <- glm(is_mal ~., family = binomial, 
+                      data = cancer_final |> select(-PC10, -PC6))
+
+stepwise_model <- logistic_model_small |>
+  step(direction = "forward", scope = formula(logistic_model_full))
+
+```
+
+## Results
+
+### Model Validation
+
+I used the `caret` package to validate the model through five-fold cross-validation, achieving an accuracy of 98.01% in classifying data as either malignant or benign. I then examined the coefficients and p-values for each variable. All of the variables had a p-value under 5%, suggesting a statistical relationship between the predictor variables and the diagnosis.
+
+```{r}
+#| warning: false
+#| label: table 2 
+#| fig-cap: "Logistic Regression Model Output"
+
+
+set.seed(123)
+# Train the GLM model with cross-validation
+reduce_model <- train(formula(stepwise_model),
+  data = cancer_final, 
+  method = "glm", 
+  family = "binomial",  # Logistic regression
+  trControl = trainControl(method = "cv", number = 5))
+
+reduce_model$finalModel |>
+  tidy() %>%    
+  mutate(p.value = ifelse(p.value < 0.0001, "<0.0001", round(p.value, 4))) %>% 
+  kbl(booktabs = TRUE, digits = 2) %>%
+  column_spec(1, monospace = TRUE) %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+### Fitted Equation
+
+$$
+\log\left[ \frac { P( \operatorname{.outcome} = \operatorname{1} ) }{ 1 - P( \operatorname{.outcome} = \operatorname{1} ) } \right] = \alpha + \beta_{1}(\operatorname{PC1}) + \beta_{2}(\operatorname{PC2}) + \beta_{3}(\operatorname{PC5}) + \beta_{4}(\operatorname{PC4}) + \beta_{5}(\operatorname{PC3}) + \beta_{6}(\operatorname{PC9}) + \beta_{7}(\operatorname{PC8})
+$$
+
+### ROC Curve
+
+The "closeness" to 1.0 suggest near perfect predictions performed by the model.
+
+```{r}
+#| label: graph 3
+#| fig-cap: "Receiver Operating Characteristic Curve"
+#| message: false
+
+
+# Get the predicted probabilities from the model
+predicted_probs <- predict(reduce_model, newdata = cancer_final, type = "prob")[,2]
+
+# Actual values (assuming 'is_mal' is your target variable)
+actual_values <- cancer_final$is_mal  
+
+
+roc_curve <- roc(actual_values, predicted_probs)
+
+# Plot the ROC curve
+plot(roc_curve, main = "ROC Curve", col = "blue")
+
+
+```
+
+### Confusion Matrix
+
+The relatively equal amount of false positives and false negatives suggests that the model performs well despite slight class imbalance. The costs associated with a false negative are much higher than those associated with a false positive, meaning the model would be improved if it sacrificed some accuracy to have fewer false negatives.
+
+```{r}
+
+# Extract confusion matrix
+conf_mat <- confusionMatrix(reduce_model)
+
+# Pretty table using knitr::kable
+kable(conf_mat$table, caption = "Confusion Matrix", align = "c")
+
+```
+
+### Comparison with Support Vector Machine
+
+A support vector machine is a supervised machine-learning method that creates a hyperplane between groups of data and classifies the data by determining which side of the hyperplane a datapoint is on. While the accuracy for the logistic regression model is higher, I haven't tuned the support vector machine to the extent I tuned the logistic regression model. Additionally, the support vector machine has a higher false negative rate, making it consideraly worse than the logistic regression model.
+
+```{r}
+set.seed(123)
+model_svm <- train(
+  as.factor(diagnosis) ~ .,
+  data = cancer_data |> select(-id),
+  method = "svmRadial",
+  tuneGrid = tune_grid <- expand.grid(
+  sigma = c(0.0318),
+  C = c(1.5)),
+  trControl = trainControl(method = "cv", number = 5),  
+  scaled = TRUE 
+)
+
+# Extract confusion matrix
+conf_mat2 <- confusionMatrix(model_svm)
+
+# Pretty table using knitr::kable
+kable(conf_mat2$table, caption = "Confusion Matrix", align = "c")
+
+```
+
+### Variable Importance
+
+I extracted the coefficients of the principle components into a vector. For the vectors not used, I filled in 0. Utilizing this vector and a matrix of loading from when the principle components were first made, I computed the "importance" of each variable in the final model. I think that variable importance would be better represented with all of the variables of the same name being conglomerated in same way.
+
+```{r}
+#| label: graph 4
+#| fig-cap: "Bar Chart of Feature Importance"
+
+
+pca_loadings_matrix <- as.matrix(pca_cancer$rotation)
+
+all_pcs <- colnames(pca_cancer$x)
+
+used_coefficients <- stepwise_model$coefficients
+used_coefficients <- used_coefficients[names(used_coefficients) != "(Intercept)"]
+
+coef_vector <- numeric(length(all_pcs))
+names(coef_vector) <- all_pcs
+
+used_pcs <- names(used_coefficients)
+
+coef_vector[used_pcs] <- used_coefficients
+
+var_importance <- pca_loadings_matrix %*% coef_vector
+
+names(var_importance) <- rownames(pca_loadings_matrix)
+
+results <- data.frame(importance = abs(var_importance), variable = names(var_importance))
+
+
+results |>
+  
+  ggplot() + geom_col(aes(y = reorder(variable, importance), x = importance), fill = "steelblue") +
+  labs(title = "Importance Scores for Each Variable",
+       x = "Importance",
+       y = "Variable") +
+   theme_minimal() +
+  theme(axis.text.y = element_text(size = 6))
+```
+
+## Discussion
+
+In this project, we aimed to create a model that accurately predicted whether a mass was malignant or benign in addition to understanding what factors might be important in that classification. With an accuracy score of 98% after cross-validating the data, the first objective was attained, but accuracy isn't always the best metric to evaluate a model. In the case of diagnosing cancer, it is much more important to minimize false negatives than false positives, thus an evaluation metric where the costs associated with each byproduct of the model could significantly improve the model's real-world applicability. Additionally, the unreliability of the step function for component selection suggests that alternate methods are prudent for the success of PCA regression. I suggest that step-wise functions include a method to change the evaluation metric of the model from AIC to other methods and a means to validate the model in order to ensure that there is no over-fitting. Finally, extracing importance features from this dataset proved to be a challenge, as it is hard to understand the importance of any single feature with such high levels of multicolinearity. I would suggest that columns containing the same name's scores are combined to understand each metric group's importance towards cancer diagnosis. Finally, I am not convinced that the logistic regression model is better than the support vector machine. I didn't tune the support vector machine to the extent that I tuned the logistic regression model. In conclusion, there is sound evidence that the logistic model accurately predicts whether a mass is benign and malignant but also brings up questions regarding accuracy as a reliable metric.
+
+## Appendix
+
+### Dendrogram
+
+```{r dendrogram}
+#| label: graph 5 
+#| fig-cap: "Dendrogram of Cancer Patients Data"
+
+
+cancer_dendrogram <- cancer_data |>
+  select(-id, -diagnosis) |>
+  scale() |>
+  dist() |>
+  hclust()
+
+dendro_data <- ggdendro::dendro_data(cancer_dendrogram)
+
+ggplot(segment(dendro_data)) +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+  theme_minimal() +
+  labs(title = "Cancer Data Dendrogram",
+       x = "Clusters",
+       y = "Height")
+#two main groups of Benign and Malignant with strings of outliers on each side
+
+#exploring the outliers
+```
+
+### 3D Scatterplot with Outlier Groups
+
+```{r outliers}
+#| label: graph 6
+#| fig-cap: "3-D scatter plot of the outliers"
+
+#Let's cut at height h
+k <- 7
+cancer_clusters <- cutree(cancer_dendrogram, k = k)
+
+#What's going on in each cluster?
+plot_ly(data = cancer_data |>
+  mutate(cluster = cancer_clusters),
+    x= ~perimeter_worst, 
+    z=~concave.points_worst,
+    y = ~`radius_worst`, 
+    color = ~cluster,  
+    type="scatter3d", mode="markers")
+
+#nothing appears to be amiss
+```
+
+### Variance Threshold for PCA with Elbow Plot
+
+The inflection point appears to be around PC10, so I included it and the components before it in my analysis.
+
+```{r}
+#| label: graph 7
+#| fig-cap: "Varience explained by PCs"
+
+
+#varience threshold for PCA
+varience <- (pca_cancer$sdev)^2
+
+prop_var <- varience / sum(varience)
+
+# Calculate cumulative variance explained
+cum_var <- cumsum(prop_var)
+
+# Create an elbow plot
+plot(
+  x = seq_along(cum_var),
+  y = cum_var,
+  type = "b",
+  pch = 19,
+  col = "blue3",
+  xlab = "Principal Component",
+  ylab = "Cumulative Variance Explained",
+  main = "Elbow Plot of PCA"
+)
+# Add a horizontal line at the 90% variance threshold
+abline(h = 0.95, col = "red", lty = 2)
+```
+
+## References
+
+-   Dataset: Wolberg, W., Mangasarian, O., Street, N., & Street, W. (1993). Breast Cancer Wisconsin (Diagnostic) \[Dataset\]. UCI Machine Learning Repository. <https://doi.org/10.24432/C5DW2B>.
+-   Learnche.org. "Principal Components Regression." *Learnche.org*, <https://learnche.org/pid/latent-variable-modelling/principal-components-regression>. Accessed 6 Dec. 2024.
