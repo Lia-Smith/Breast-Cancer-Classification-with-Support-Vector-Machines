@@ -1,0 +1,457 @@
+---
+title: "Breast Cancer Diangosis with SVM"
+author: "Lia Smith and Onat Birsen"
+date: "2024-11-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r packages}
+#| warning: false
+#| message: false
+# Load Packages
+library(plotly)
+library(tidyverse)
+library(kernlab)
+library(caret)
+library(scales)
+library(ranger)
+library(knitr)
+
+```
+
+```{r loading data}
+#| message: false
+cancer_data <- read.csv("C:/Users/liapu/OneDrive/Desktop/Fall 2024/breast-cancer.csv")
+```
+## Introduction
+Every year, breast cancer accounts for 30% of all cancer cases among women in the U.S., with a woman having a 13% lifetime risk of developing the disease (breastcancer.org, 2024).  With such high occurrence rates, breast cancer is the second leading cause of cancer deaths in women (American Cancer Society, 2024). Similar to other types of cancer, the World Health Organization identifies early diagnosis as the most effective way to combat breast cancer (WHO, 2024). With these facts and statistics in mind, our project aims to analyze data on breast tumor characteristics to distinguish between cancerous and benign tumors while identifying the strongest predictors of breast cancer. After our exploratory data analysis,  we implement a random forest as a benchmark model, and improve on it with a support vector machine. 
+
+## Exploratory Data Analysis
+
+The data for our project comes from the Breast Cancer Diagnostic Dataset from the University of Wisconsin Madison (hyperlink this). The dataset consists of 569 instances derived from digitized images of fine needle aspirates (FNAs) of breast masses. Each instance is classified as either benign or malignant, with 30 numeric features characterizing the cell nuclei, including measurements of radius, texture, smoothness, compactness, and symmetry. 
+
+```{r inital plot}
+plot_ly(
+  data = cancer_data,
+  x = ~perimeter_worst,
+  y = ~radius_worst,
+  z = ~concave.points_worst,
+  color = ~as.factor(diagnosis),
+  colors = c("pink", "hotpink"),
+  type = "scatter3d",
+  mode = "markers")
+```
+## Dendrogram and Outlier Plot
+We start exploring the data with a dendrogram. From the dendrogram we noticed a couple of outlier points outside of the main clusters containing the benign and malignant groups of data. We made 7 groups of data in order to capture points that were considered outliers outside of the main benign and malignant groups of points.  We plot the data with a 3-D scatter plot and determine that the outliers did not pose any issues in classification or model development
+
+```{r dendrogram}
+cancer_dendrogram <- cancer_data |>
+  select(-id, -diagnosis) |>
+  scale() |>
+  dist() |>
+  hclust()
+
+plot(cancer_dendrogram)
+```
+
+```{r outlier plot}
+# 3-D Scatter Plot with outliers
+#Let's cut at height h
+k <- 7
+cancer_clusters <- cutree(cancer_dendrogram, k = k)
+
+#What's going on in each cluster?
+plot_ly(data = cancer_data |>
+  mutate(cluster = cancer_clusters),
+    x= ~perimeter_worst, 
+    z=~concave.points_worst,
+    y = ~`radius_worst`, 
+    color = ~cluster,  
+    type="scatter3d", mode="markers")
+```
+## Random Forest Tuning
+A random forest is a supervised learning model that uses a collection of decision trees to make predictions. It works by creating many different models (called trees) that each look at random parts of the data, and then combine predictions. Each tree will use a decision process withthese variables to determine whether they are cancerous or not and all of the trees will vote together to determine if the point is classified as malignant or benign. We tune the model using a plethora of values for parameters such as mtry, splitrule, min.node.size, maxdepth and num.trees. Here, mtry controls how many features the model looks in each split of the data, balancing accuracy and diversity among trees. Splitrule what metric decides the best split for the data. Min.node.size sets the smallest number of data points allowed in each split data set. Maxdepth limits how deep the trees grow to prevent overfitting, and num.trees specifies how many trees are made total.
+
+```{r random forest, results='hide'}
+#| message: false
+
+set.seed(123)
+train_indices <- sample(1:nrow(cancer_data), 0.8 * nrow(cancer_data))
+train_data <- cancer_data[train_indices, ]
+test_data <- cancer_data[-train_indices, ]
+
+tune_grid <- expand.grid(
+  mtry = c(14),         
+  splitrule = c("extratrees"),  
+  min.node.size = c(3)     
+)
+
+train_control <- trainControl(
+  method = "boot632", 
+  number = 25)
+ 
+#kernal function for later 
+
+model_rf <- train(
+  as.factor(diagnosis) ~.,
+  data = train_data |> select(-id),
+  method = "ranger",
+  tuneGrid = tune_grid,
+  importance = "impurity",
+  num.trees = 500,
+  trControl = train_control)
+
+
+
+
+# RF table
+predictions_rf <- predict(model_rf, newdata = test_data |> select(-id, -diagnosis))
+
+ 
+
+# Generate the confusion matrix
+
+conf_matrix_rf <- confusionMatrix(
+  predictions_rf,
+  as.factor(test_data$diagnosis),
+  positive = "M"
+)
+
+accuracy_rf <- conf_matrix_rf$overall["Accuracy"]
+sensitivity_rf <- conf_matrix_rf$byClass["Sensitivity"]
+specificity_rf <- conf_matrix_rf$byClass["Specificity"]
+ppv_rf <- conf_matrix_rf$byClass["Pos Pred Value"]
+npv_rf <- conf_matrix_rf$byClass["Neg Pred Value"]
+
+metrics_rf <- data.frame(
+  `Machine learning algorithm` = "Random Forest",
+  Accuracy = accuracy_rf,
+  Sensitivity = sensitivity_rf,
+  Specificity = specificity_rf,
+  PPV = ppv_rf,
+  NPV = npv_rf
+)
+```
+## Support Vector Machines 
+A support vector machine is a supervised learning method often used for classification. In the context of breast cancer diagnosis, it finds a separator between the malignant and benign groups and classifies points on the side with a majority of malignant points as malignant and classifies points on the side with a majority of benign points as benign. For this project, we make four different support vector machines. These consist of linear, polynomial, radial, and sigmoid support vector machines. The main difference between these models is how the partition between groups is made. 
+
+## Linear Support Vector Machine
+The Linear Support Vector Machine creates a linear boundary between the groups of data. Imagine a line separating the two groups. The drawbacks of this method are that it assumes that the data is linearly separable into two groups or that a “clean” division can be made with a line. In this model, the tuning parameter is the cost or how much computational effort goes into making the “perfect” boundary between the two groups. A common metric for cost is <1 is low cost, 1-10 is moderate cost, and >10 is high cost. We make a for loop to tune this parameter and validate it with five fold cross validation. We end up with a cost of 1
+
+
+```{r SVM Linear, results='hide'}
+#| message: false
+
+set.seed(123)
+# SVM Polynomial with degree 1 (so it's linear)
+
+tuneGrid = expand.grid(C =c(1))
+
+#Train the model
+model_svm_linear <- train(
+  as.factor(diagnosis) ~ .,
+  data = train_data %>% select(-id),
+  method = "svmLinear",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = tuneGrid,
+  class.weights = c("M" = 10, "B"=1)
+)
+
+
+print(model_svm_linear)
+
+# Linear SVM TABLE
+predictions_svm_linear <- predict(model_svm_linear, newdata = test_data %>% select(-id, -diagnosis))
+
+conf_matrix_svm_linear <- confusionMatrix(
+  predictions_svm_linear,
+  as.factor(test_data$diagnosis),
+  positive = "M" 
+)
+
+accuracy_svm_linear <- conf_matrix_svm_linear$overall["Accuracy"]
+sensitivity_svm_linear <- conf_matrix_svm_linear$byClass["Sensitivity"]
+specificity_svm_linear <- conf_matrix_svm_linear$byClass["Specificity"]
+ppv_svm_linear <- conf_matrix_svm_linear$byClass["Pos Pred Value"]
+npv_svm_linear <- conf_matrix_svm_linear$byClass["Neg Pred Value"]
+
+metrics_svm_linear <- data.frame(
+  `Machine learning algorithm` = "SVM (Linear)",
+  Accuracy = accuracy_svm_linear,
+  Sensitivity = sensitivity_svm_linear,
+  Specificity = specificity_svm_linear,
+  PPV = ppv_svm_linear,
+  NPV = npv_svm_linear
+
+)
+print(metrics_svm_linear)
+```
+
+## Polynomial Support Vector Machine
+Polynomial Support Vector Machine
+The Polynomial SVM creates a polynomial boundary instead of a linear one. Imagine if the data wasn’t linearly separable and a parabolic or a cubic function creates a better partition for the data. One of the issues this method often faces is “overfitting” the function such that it divides the existing data points well rather than finding an actual relationship in the data. A kernel with a power of 20 might have great accuracy on the training set but not generalize well to other data if it wraps around all of the individual points in the space where the malignant and benign groups meet. In this SVM, we tune the degree of the polynomial used to divide the data and the same cost parameter as above. We use a for loop to tune these parameters. We end up with cost = 2 and degree = 5.
+
+
+
+```{r SVM polynomial, results='hide'}
+#| message: false
+
+set.seed(123)
+tuneGrid = expand.grid(C = c(2),
+                       degree = c(5),
+                       scale = c(TRUE)) # Define the tuning grid
+
+# Train the model
+model_svm_poly <- train(
+  as.factor(diagnosis) ~ .,
+  data = train_data |> select(-id),
+  method = "svmPoly",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = tuneGrid # Corrected to match the argument name
+)
+
+# Print the model
+print(model_svm_poly)
+
+predictions_svm_poly <- predict(model_svm_poly, newdata = test_data |> select(-id, -diagnosis))
+
+conf_matrix_svm_poly <- confusionMatrix(
+  predictions_svm_poly,
+  as.factor(test_data$diagnosis),
+  positive = "M"  # Assuming "M" is the positive class
+)
+accuracy_svm_poly <- conf_matrix_svm_poly$overall["Accuracy"]
+sensitivity_svm_poly <- conf_matrix_svm_poly$byClass["Sensitivity"]
+specificity_svm_poly <- conf_matrix_svm_poly$byClass["Specificity"]
+ppv_svm_poly <- conf_matrix_svm_poly$byClass["Pos Pred Value"]
+npv_svm_poly <- conf_matrix_svm_poly$byClass["Neg Pred Value"]
+metrics_svm_poly <- data.frame(
+
+  `Machine learning algorithm` = "SVM (Polynomial)",
+  Accuracy = accuracy_svm_poly,
+  Sensitivity = sensitivity_svm_poly,
+  Specificity = specificity_svm_poly,
+  PPV = ppv_svm_poly,
+  NPV = npv_svm_poly
+)
+
+print(metrics_svm_poly)
+```
+## Radial Support Vector Machine
+A radial Support Machine utilizes a circle boundary to separate the two classes. Imagine a donut and a donut hole as the two classes of data being separated. The radial support machine makes a circle that’s in n dimensions. Within this model, we tune the cost and sigma. Sigma controls how much influence each point has in determining the shape of the boundary. A large sigma makes the boundary smooth, as it tries to accommodate many points, even those that are far. On the other hand, a low sigma means only the points closest to the boundary influence it and we end up with a boundary that tightly wraps around these points. With a very low sigma, we risk over fitting. Similar to a linear kernel, the cost parameter  controls the trade-off between correctly classifying training data and keeping the decision boundary simple. A high cost prioritizes minimizing errors on the training data, which can lead to overfitting, while a low cost allows some misclassifications to create a simpler, more generalizable model. We end up with sigma = .0318 and C=1.5.
+
+```{r SVM, results='hide'}
+#| message: false
+
+set.seed(123)
+
+model_svm_radial <- train(
+  as.factor(diagnosis) ~ .,
+  data = train_data |> select(-id),
+  method = "svmRadial",
+  tuneGrid = tune_grid <- expand.grid(
+  sigma = c(0.0318),
+  C = c(1.5)),
+  trControl = trainControl(method = "cv", number = 5),  
+  scaled = TRUE 
+) 
+
+# Radial SVM TABLE
+predictions_svm_radial <- predict(model_svm_radial, newdata = test_data %>% select(-id, -diagnosis))
+
+conf_matrix_svm_radial <- confusionMatrix(
+  predictions_svm_radial,
+  as.factor(test_data$diagnosis),
+  positive = "M" 
+
+)
+accuracy_svm_radial <- conf_matrix_svm_radial$overall["Accuracy"]
+sensitivity_svm_radial <- conf_matrix_svm_radial$byClass["Sensitivity"]
+specificity_svm_radial <- conf_matrix_svm_radial$byClass["Specificity"]
+ppv_svm_radial <- conf_matrix_svm_radial$byClass["Pos Pred Value"]
+npv_svm_radial <- conf_matrix_svm_radial$byClass["Neg Pred Value"]
+
+ 
+
+metrics_svm_radial <- data.frame(
+  `Machine learning algorithm` = "SVM (Radial)",
+  Accuracy = accuracy_svm_radial,
+  Sensitivity = sensitivity_svm_radial,
+  Specificity = specificity_svm_radial,
+  PPV = ppv_svm_radial,
+  NPV = npv_svm_radial
+
+)
+
+print(metrics_svm_radial)
+```
+## Sigmoid Support Vector Machine
+A sigmoid SVM works best when the decision boundary is not linear, but also doesn’t have a very complex shape such as a circle. The sigmoid boundary looks like the letter “S”, and works best with groups that are separated by a soft threshold. For our data, where the two groups slightly overlap each other, the sigmoid boundary can curve around the points to accurately separate the two groups. The sigmoid kernel in an SVM has three key parameters: regularization, alpha, and offset. The regularization parameter controls how strictly the model fits the training data, with smaller values allowing a simpler decision boundary and larger values fitting the data more precisely. The scale parameter  adjusts how sharply the sigmoid function curves, influencing how flexible the decision boundary is, while the offset  shifts the decision boundary to balance or bias the separation between classes. To find the parameters that lead to the highest accuracy, we set up a for loop to try a number of values. In the end, regularization = 100, scale = 0.01 and offset = -1 are the most accurate.
+
+
+```{r sigmoid, results='hide'}
+#| message: false
+
+
+
+set.seed(123)
+
+best_C <- 10
+best_scale <- 0.01
+best_offset <- -1
+# Create folds
+
+folds <- createFolds(cancer_data$diagnosis, k = 5, list = TRUE)
+cancer_data$Predicted <- NA  
+
+for (i in seq_along(folds)) {
+  train_data <- cancer_data[-folds[[i]], ]
+  test_data <- cancer_data[folds[[i]], ]
+  
+  
+  model <- ksvm(
+    as.factor(diagnosis) ~ .,
+    data = train_data |> select(-id, -Predicted),
+    kernel = "tanhdot",  # Sigmoid kernel
+    C = best_C,
+    kpar = list(scale = best_scale, offset = best_offset)
+  )
+  
+  
+  predictions <- predict(model, test_data |> select(-id, -Predicted))
+  cancer_data$Predicted[folds[[i]]] <- as.character(predictions)
+}
+
+cancer_data$diagnosis <- factor(cancer_data$diagnosis, levels = c("M", "B"))
+cancer_data$Predicted <- factor(cancer_data$Predicted, levels = c("M", "B"))
+ 
+cancer_data$Predicted <- factor(cancer_data$Predicted, levels = levels(cancer_data$diagnosis))
+conf_matrix_svm_sigmoid <- confusionMatrix(
+  cancer_data$Predicted,
+  as.factor(cancer_data$diagnosis),
+  positive = "M"  # Assuming "M" is the positive class
+
+)
+
+ 
+
+ 
+
+accuracy_svm_sigmoid <- conf_matrix_svm_sigmoid$overall["Accuracy"]
+sensitivity_svm_sigmoid <- conf_matrix_svm_sigmoid$byClass["Sensitivity"]
+specificity_svm_sigmoid <- conf_matrix_svm_sigmoid$byClass["Specificity"]
+ppv_svm_sigmoid <- conf_matrix_svm_sigmoid$byClass["Pos Pred Value"]
+npv_svm_sigmoid <- conf_matrix_svm_sigmoid$byClass["Neg Pred Value"]
+
+ 
+
+ 
+
+metrics_svm_sigmoid <- data.frame(
+  `Machine learning algorithm` = "SVM (Sigmoid)",
+  Accuracy = accuracy_svm_sigmoid,
+  Sensitivity = sensitivity_svm_sigmoid,
+  Specificity = specificity_svm_sigmoid,
+  PPV = ppv_svm_sigmoid,
+  NPV = npv_svm_sigmoid
+
+)
+
+ 
+
+print(metrics_svm_sigmoid)
+
+```
+## Results
+For all of our models, we report accuracy, sensitivity, specificity, positive predictive value (PPV), and negative predictive value (NPV) to evaluate their performance. Accuracy measures the overall correctness of the model by calculating the proportion of correctly predicted cases, both malignant and benign. Sensitivity, also known as recall or true positive rate, evaluates the model's ability to correctly identify positive cases, in our case malignant tumors. Specificity focuses on how well the model identifies negative cases, correctly classifying benign tumors.
+Looking at the results, SVM with radial kernel and linear kernel have the highest accuracy with 98.2% and 99.1% respectively. The linear model also has the highest sensitivity along with the radial kernel. This means that these two models had the highest ability to identify malignant tumors. In our context, given the importance of an early and correct diagnosis in beating breast cancer, a high sensitivity makes SVM with linear and radial kernels highly valuable. In terms of specificity, SVM with sigmoid kernel has the highest ability to detect benign tumors.
+
+```{r compiled metrics}
+
+full_metrics <- rbind(metrics_rf, metrics_svm_linear, metrics_svm_poly, metrics_svm_radial, metrics_svm_sigmoid) |>
+  select(-PPV, -NPV)
+rownames(full_metrics) <- NULL
+kable(full_metrics, caption = "Model Metric Results")
+```
+
+
+
+
+```{r Misclassification graph}
+predictions <- predict(model_svm_linear, test_data |> select(-id, -diagnosis))
+
+predict_data <- test_data |>
+  select(-id) |>
+  mutate(prediction = predictions) |>
+  mutate(results = case_when(
+    prediction == "B" & diagnosis == "B" ~ "True Negative",
+    prediction == "M" & diagnosis == "M" ~ "True Positive",
+    prediction == "M" & diagnosis == "B" ~ "False Positive",
+    prediction == "B" & diagnosis == "M" ~ "False Negative"))
+
+
+plot_ly(
+  data = predict_data,
+  x = ~perimeter_worst,
+  y = ~radius_worst,
+  z = ~concave.points_worst,
+  color = ~results,
+  colors = c("lightblue", "lightpink", "yellow", "tan"),
+  type = "scatter3d",
+  mode = "markers"
+)
+```
+## Feature Importance
+The feature importance seems to be very inaccurate. When extracting variable importance, we have to consider multicollinearity, which happens when two or more variables in a dataset are highly correlated, meaning they provide overlapping information. For example, tumor perimeter and area are both measures of size, and are therefore highly correlated. When implementing an SVM with a linear kernel, variable importance is based on the size of the coefficients of the linear boundary. With highly collinear variables, we can end up with one variable with a really high coefficient and the other really low, even though they are equally important in reality. We first tried to deal with this by removing all of the vatriables with the same first word, since we assumbed that this would account for the majority of variable correlation, hoever even with this mitigating step, problems persisted. 
+
+```{r}
+
+# Define feature names
+names <- c("radius", "texture", "perimeter", "area", "smoothness", "compactness", 
+           "concavity", "concave.points", "symmetry", "fractal_dimension")
+
+# Initialize a data frame to store results
+feature_importance <- data.frame(
+  Feature = character(),
+  Accuracy = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each feature
+for (name in names) {
+  # Remove the feature from train and test data
+  temp_train <- train_data %>% select(-starts_with(name))
+  temp_test <- test_data %>% select(-starts_with(name))
+  
+  # Define the tuning grid
+  tuneGrid = expand.grid(C = c(1))
+  
+  # Train the model without the feature
+  model_svm_linear <- train(
+    as.factor(diagnosis) ~ .,
+    data = temp_train %>% select(-id),
+    method = "svmLinear",
+    trControl = trainControl(method = "cv", number = 5),
+    tuneGrid = tuneGrid
+  )
+  
+  # Extract cross-validated accuracy
+  accuracy <- max(model_svm_linear$results$Accuracy)
+  
+  # Append results to the feature importance data frame
+  feature_importance <- rbind(
+    feature_importance,
+    data.frame(Feature = name, Accuracy = accuracy)
+  )
+}
+
+# Print feature importance results
+kable(feature_importance, caption = "Feature Importance Results")
+
+```
+
+## Conclusions:
+Though our models performed remarkably well on the dataset, it is important to consider why they performed so well. The dataset was compiled from digitized images of fine needle aspirates (FNAs) of breast masses, suggesting that the sampled population represents people that were already suspected of having cancerous tumors and needing imaging. The lack of a control group of people who are not in need of testing suggests that the models may not generalize well to the general population and should be used only in specific circumstances. In addition, the models tended to have more false negatives than false positives, demonstrating that malignant tumor characteristics are more diverse than benign tumor characteristics. Though it is more important to reduce false negatives, particularly in the case of cancer diagnosis, it comes at a greater cost due to the diversity of cancer tumor characteristics. Finally, feature importance is extraordinarily difficult to ascertain with the high levels of correlation variables have. 
+
